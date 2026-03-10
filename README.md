@@ -38,6 +38,7 @@ bedrock-agentcore-eks-monitor/
 │   └── requirements.txt
 ├── app/                          # Demo apps for testing
 │   ├── test-crash.yaml           # Deployment that OOMKills repeatedly
+│   ├── test-crashloop.yaml       # Deployment that exits immediately (CrashLoopBackOff)
 │   └── test-imagepull.yaml       # Deployment with bad image (ImagePullBackOff)
 ├── infra/                        # Terraform — deploy from here
 │   ├── agentcore_runtime.tf      # AgentCore Runtime + S3 artifact
@@ -56,9 +57,10 @@ bedrock-agentcore-eks-monitor/
 │   ├── alertmanager-secret.yaml  # Alertmanager routes + webhook config
 │   ├── demo-app-alerts.yaml      # Prometheus alert rules for demo apps
 │   └── values.yaml
-├── test2.py                      # VS Code script: trigger CrashLoopBackOff scenario
-├── test3.py                      # VS Code script: trigger ImagePullBackOff scenario
-└── demo.sh                       # Run all 3 scenarios end-to-end
+├── test2.py                      # Deploy crashloop app → trigger CrashLoopBackOff scenario
+├── test3.py                      # Direct webhook: trigger ImagePullBackOff escalation
+├── test4.py                      # Direct webhook: trigger Node NotReady escalation
+└── demo.sh                       # Run all 3 scenarios end-to-end (automated)
 ```
 
 ---
@@ -168,13 +170,17 @@ Add under `mapRoles`:
 
 ## Testing the Stack
 
-The demo is **fully automated** — Prometheus detects pod failures, Alertmanager fires the webhook, and AgentCore remediates without any manual trigger.
+There are **two ways** to trigger scenarios:
+
+| Method | How it works | Speed |
+|--------|-------------|-------|
+| **Automated** (via Prometheus) | Deploy a broken pod → Prometheus detects it → Alertmanager fires the webhook → AgentCore remediates | ~60–90s |
+| **Direct webhook** (`curl`) | Send a crafted alert payload directly to `/api/investigate` | Instant |
 
 Alert timing (tuned for demo speed):
 - Prometheus evaluates every **30s**
 - All alert rules fire immediately (`for: 0m`)
 - Alertmanager `group_wait` is **10s**
-- **Total time from pod crash to agent action: ~60–90 seconds**
 
 ---
 
@@ -183,74 +189,213 @@ Alert timing (tuned for demo speed):
 > **Required before running any scenario.**
 
 ```bash
+# Port-forward the webhook server
 kubectl port-forward svc/alertmanager-webhook-server -n alertmanager-agent 8091:80 &
-```
 
-```bash
+# Verify it's up
 curl -s http://localhost:8091/health
 ```
+
 Expected: `{"status":"ok"}`
 
 ---
 
-### Scenario 1 — OOMKilled (automated)
+### Run All Scenarios End-to-End
 
-Deploys a pod with insufficient memory. Prometheus detects OOMKill → Alertmanager fires → AgentCore patches memory and restarts.
-
-```bash
-kubectl apply -f /Users/ranjiniganeshan/bedrock-agentcore-eks-monitor/app/test-crash.yaml
-```
+`demo.sh` deploys the test app, sends all three webhook payloads, prints agent responses, and cleans up.
 
 ```bash
-kubectl get pods -n default -w
+bash demo.sh
 ```
-
-Expected (~60–90s): `OOMKilled` → agent patches memory `32Mi → 256Mi` → pod `Running`
 
 ---
 
-### Scenario 2 — CrashLoopBackOff (automated)
+### Scenario 1 — OOMKilled
 
-Deploys a pod that exits immediately. Prometheus detects CrashLoopBackOff → Alertmanager fires → AgentCore restarts the deployment.
+Deploys a pod (`polinux/stress`) with a `32Mi` memory limit that immediately exceeds it. AgentCore patches the limit to `256Mi` and restarts the pod.
 
+**Automated — via Prometheus (~60–90s):**
 ```bash
-python3 /Users/ranjiniganeshan/bedrock-agentcore-eks-monitor/test2.py
-```
-
-```bash
+kubectl apply -f app/test-crash.yaml
 kubectl get pods -n default -w
 ```
 
-Expected (~60–90s): `CrashLoopBackOff` → agent triggers rollout restart → pod `Running`
+**Direct webhook (instant):**
+```bash
+POD=$(kubectl get pods -n default -l app=demo-app-crashing \
+  -o jsonpath='{.items[0].metadata.name}')
+
+curl -s http://localhost:8091/api/investigate \
+  -H 'Content-Type: application/json' \
+  -d "{\"alerts\":[{
+    \"status\":\"firing\",
+    \"labels\":{
+      \"alertname\":\"KubePodCrashLooping\",
+      \"severity\":\"critical\",
+      \"namespace\":\"default\",
+      \"pod\":\"$POD\",
+      \"reason\":\"OOMKilled\"
+    },
+    \"annotations\":{\"summary\":\"Pod OOMKilled\"}
+  }]}" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(json.loads(d.get('response', '{}')).get('response', d))
+"
+```
+
+**Verify the fix:**
+```bash
+kubectl get deployment demo-app-crashing -n default \
+  -o jsonpath='Memory limit after fix: {.spec.template.spec.containers[0].resources.limits.memory}{"\n"}'
+kubectl get pods -n default -l app=demo-app-crashing
+```
+
+Expected: memory limit updated to `256Mi`, pod status `Running`.
 
 ---
 
-### Scenario 3 — ImagePullBackOff (automated: JIRA + Slack)
+### Scenario 2 — CrashLoopBackOff
 
-Deploys a pod with a bad image. Prometheus detects ImagePullBackOff → Alertmanager fires → AgentCore escalates to JIRA and Slack.
+Deploys a pod that exits immediately (no-op container). AgentCore triggers a rollout restart.
 
+**Automated — via Prometheus (~60–90s):**
 ```bash
-kubectl apply -f /Users/ranjiniganeshan/bedrock-agentcore-eks-monitor/app/test-imagepull.yaml
+# test2.py applies app/test-crashloop.yaml and prints watch commands
+python3 test2.py
+kubectl get pods -n default -w
 ```
 
-Watch the escalation happen:
+**Direct webhook (instant):**
+```bash
+POD=$(kubectl get pods -n default -l app=demo-app-crashloop \
+  -o jsonpath='{.items[0].metadata.name}')
+
+curl -s http://localhost:8091/api/investigate \
+  -H 'Content-Type: application/json' \
+  -d "{\"alerts\":[{
+    \"status\":\"firing\",
+    \"labels\":{
+      \"alertname\":\"KubePodCrashLooping\",
+      \"severity\":\"critical\",
+      \"namespace\":\"default\",
+      \"pod\":\"$POD\",
+      \"reason\":\"CrashLoopBackOff\"
+    },
+    \"annotations\":{\"summary\":\"Pod CrashLoopBackOff\"}
+  }]}" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(json.loads(d.get('response', '{}')).get('response', d))
+"
+```
+
+**Watch agent logs:**
 ```bash
 kubectl logs -n alertmanager-agent deployment/alertmanager-webhook-server -f
 ```
 
-Expected (~60s): Agent creates a JIRA ticket + sends Slack notification.
+Expected: agent runs `kubectl rollout restart`, pod recovers to `Running`.
+
+---
+
+### Scenario 3 — ImagePullBackOff (JIRA + Slack escalation)
+
+Simulates a pod stuck on a bad image. AgentCore cannot self-heal this — it creates a JIRA ticket and sends a Slack notification.
+
+**Automated — via Prometheus (~60–90s):**
+```bash
+kubectl apply -f app/test-imagepull.yaml
+kubectl get pods -n default -w
+```
+
+**Direct webhook — same as `test3.py`:**
+```bash
+python3 test3.py
+```
+
+Or manually with curl:
+```bash
+curl -s http://localhost:8091/api/investigate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "alerts": [{
+      "status": "firing",
+      "labels": {
+        "alertname": "KubePodNotReady",
+        "severity": "critical",
+        "namespace": "default",
+        "pod": "payments-service-abc123",
+        "reason": "ImagePullBackOff"
+      },
+      "annotations": {
+        "summary": "Pod cannot pull image",
+        "description": "bad-registry/payments:nonexistent"
+      }
+    }]
+  }' | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(json.loads(d.get('response', '{}')).get('response', d))
+"
+```
+
+**Watch escalation:**
+```bash
+kubectl logs -n alertmanager-agent deployment/alertmanager-webhook-server -f
+```
+
+Expected: agent creates a JIRA ticket and sends a Slack notification (~30s).
+
+---
+
+### Scenario 4 — Node NotReady / MemoryPressure (JIRA + Slack escalation)
+
+Simulates a node under MemoryPressure. AgentCore cordons the node and escalates to JIRA and Slack.
+
+**Direct webhook — same as `test4.py`:**
+```bash
+python3 test4.py
+```
+
+Or manually with curl:
+```bash
+NODE=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+
+curl -s http://localhost:8091/api/investigate \
+  -H 'Content-Type: application/json' \
+  -d "{\"alerts\":[{
+    \"status\":\"firing\",
+    \"labels\":{
+      \"alertname\":\"KubeNodeNotReady\",
+      \"severity\":\"critical\",
+      \"node\":\"$NODE\",
+      \"reason\":\"NodeNotReady\"
+    },
+    \"annotations\":{
+      \"summary\":\"Node $NODE is NotReady\",
+      \"description\":\"Node $NODE has MemoryPressure — risk of pod evictions and OOMKill.\"
+    }
+  }]}" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(json.loads(d.get('response', '{}')).get('response', d))
+"
+```
+
+Expected: agent cordons the node, creates a JIRA ticket, and sends a Slack notification.
 
 ---
 
 ### Cleanup
 
 ```bash
-kubectl delete deployment demo-app-crashing demo-app-crashloop demo-app-imagepull -n default
-```
+# Delete all test deployments
+kubectl delete deployment demo-app-crashing demo-app-crashloop demo-app-imagepull \
+  -n default --ignore-not-found
 
-```bash
+# Stop port-forward
 pkill -f "port-forward.*8091"
-```
 ```
 
 ---
