@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app-imagepull
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-app-imagepull
+  template:
+    metadata:
+      labels:
+        app: demo-app-imagepull
+    spec:
+      containers:
+        - name: app
+          image: bad-registry/payments:nonexistent
+          resources:
+            limits:
+              memory: "64Mi"
+            requests:
+              memory: "32Mi"

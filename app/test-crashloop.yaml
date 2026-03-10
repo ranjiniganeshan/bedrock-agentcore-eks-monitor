@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app-crashloop
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-app-crashloop
+  template:
+    metadata:
+      labels:
+        app: demo-app-crashloop
+    spec:
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "echo 'App started'; sleep 2; exit 1"]
+          resources:
+            limits:
+              memory: "64Mi"
+            requests:
+              memory: "32Mi"

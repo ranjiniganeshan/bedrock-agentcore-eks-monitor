@@ -1,0 +1,46 @@
+# values.yaml – Alertmanager config for kube-prometheus-stack Helm chart.
+# Routes critical and warning alerts to the in-cluster webhook server.
+#
+# Apply with:
+#   helm upgrade prometheus-stack prometheus-community/kube-prometheus-stack \
+#     -n monitoring -f monitoring/values.yaml
+
+alertmanager:
+  config:
+    global:
+      resolve_timeout: 5m
+
+    route:
+      receiver: "null"
+      group_by: ["namespace"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 12h
+      routes:
+        - receiver: "ai-agent"
+          matchers:
+            - severity="critical"
+          continue: true
+
+    inhibit_rules:
+      - source_matchers: [severity="critical"]
+        target_matchers: [severity=~"warning|info"]
+        equal: ["namespace", "alertname"]
+      - source_matchers: [severity="warning"]
+        target_matchers: [severity="info"]
+        equal: ["namespace", "alertname"]
+      - source_matchers: [alertname="InfoInhibitor"]
+        target_matchers: [severity="info"]
+        equal: ["namespace"]
+      - target_matchers: [alertname="InfoInhibitor"]
+
+    receivers:
+      - name: "null"
+
+      - name: "ai-agent"
+        webhook_configs:
+          - url: "http://webhook-agent.monitoring.svc.cluster.local:8080/api/investigate"
+            send_resolved: true
+
+    templates:
+      - /etc/alertmanager/config/*.tmpl

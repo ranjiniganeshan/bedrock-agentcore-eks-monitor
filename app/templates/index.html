@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ title }}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f5f3f9;
+      --surface: #fff;
+      --text: #1d1d1f;
+      --text-muted: #6e6e73;
+      --accent: #0a84ff;
+      --accent-soft: #e8f4ff;
+      --border: #e5e5ea;
+      --success: #30d158;
+      --radius: 12px;
+      --shadow: 0 2px 12px rgba(0,0,0,.06);
+      --dark-bg: #3d3552;
+      --dark-text: #f0eef6;
+      --dark-muted: #b8b0c9;
+      --dark-border: #554d6a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'IBM Plex Sans', -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      min-height: 100vh;
+      padding: 2rem 1rem;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    .container {
+      max-width: 640px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin: 0 0 0.25rem 0;
+      letter-spacing: -0.02em;
+    }
+    .subtitle {
+      color: var(--text-muted);
+      margin: 0 0 1.5rem 0;
+      font-size: 0.95rem;
+    }
+    .card {
+      background: var(--surface);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 1rem;
+      border: 1px solid var(--border);
+    }
+    .card--dark {
+      background: var(--dark-bg);
+      border-color: var(--dark-border);
+    }
+    .card--dark h2 {
+      color: var(--dark-muted);
+    }
+    .card--dark .env-table th {
+      color: var(--dark-muted);
+      border-bottom-color: var(--dark-border);
+    }
+    .card--dark .env-table td {
+      border-bottom-color: var(--dark-border);
+    }
+    .card--dark .env-value {
+      color: var(--dark-text);
+    }
+    .card--dark .env-value.empty {
+      color: var(--dark-muted);
+    }
+    .card h2 {
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-muted);
+      margin: 0 0 0.75rem 0;
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+    .status-row:last-child { margin-bottom: 0; }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--success);
+      flex-shrink: 0;
+    }
+    .uptime {
+      font-size: 1.25rem;
+      font-weight: 500;
+      color: var(--text);
+    }
+    .env-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+    .env-table th {
+      text-align: left;
+      font-weight: 500;
+      color: var(--text-muted);
+      padding: 0.4rem 0.75rem 0.4rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .env-table td {
+      padding: 0.4rem 0.75rem 0.4rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .env-table tr:last-child th,
+    .env-table tr:last-child td { border-bottom: 0; }
+    .env-value {
+      font-family: ui-monospace, monospace;
+      font-size: 0.85rem;
+      color: var(--text);
+      word-break: break-all;
+    }
+    .env-value.empty { color: var(--text-muted); font-style: italic; }
+    .links {
+      margin-top: 1.5rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+    .links a {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 0.9rem;
+    }
+    .links a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>{{ title }}</h1>
+    <p class="subtitle">DevOps demo app — failure simulation endpoints</p>
+
+    <div class="card">
+      <h2>Status</h2>
+      <div class="status-row">
+        <span class="dot"></span>
+        <span class="uptime">Uptime: {{ uptime_human }}</span>
+      </div>
+    </div>
+
+    <div class="card card--dark">
+      <h2>Configuration</h2>
+      <table class="env-table">
+        {% for key, value in env.items() %}
+        <tr>
+          <th>{{ key }}</th>
+          <td><span class="env-value {{ 'empty' if value == '' else '' }}">{{ value if value else '(not set)' }}</span></td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+
+    <div class="links">
+      <a href="/healthz">Health check (JSON)</a>
+      <a href="/readyz">Readiness (JSON)</a>
+      <a href="/?json=1">Raw API (JSON)</a>
+    </div>
+  </div>
+</body>
+</html>

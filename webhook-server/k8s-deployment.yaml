@@ -1,0 +1,144 @@
+# Kubernetes manifests for the Alertmanager webhook server on EKS.
+#
+# What is deployed:
+#   1. Namespace          – alertmanager-agent
+#   2. ServiceAccount     – webhook-server-sa  (used by the pod)
+#   3. ClusterRole        – webhook-server-role  (read/patch workloads + logs)
+#   4. ClusterRoleBinding – binds the role to the ServiceAccount
+#   5. Deployment         – the webhook server (FastAPI + Strands agent)
+#   6. Service            – ClusterIP so Alertmanager can reach it in-cluster
+#
+# Usage:
+#   1. Build & push the image to ECR (see webhook-server/README.md).
+#   2. Create the secret:
+#        kubectl create secret generic webhook-secrets -n alertmanager-agent \
+#          --from-literal=openai-api-key='sk-...'
+#   3. Update the `image:` field below with your ECR URI.
+#   4. Apply:
+#        kubectl apply -f webhook-server/k8s-deployment.yaml
+#
+# Alertmanager webhook URL (use in alertmanager-secret.yaml / values.yaml):
+#   http://alertmanager-webhook-server.alertmanager-agent.svc.cluster.local/webhook
+# ---------------------------------------------------------------------------
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: alertmanager-agent
+
+---
+# ServiceAccount the pod runs as.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: webhook-server-sa
+  namespace: alertmanager-agent
+
+---
+# ClusterRole: minimum permissions needed by the Strands k8s_tools.
+# The agent reads pod/deployment/event data and may patch resource limits
+# and restart deployments.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: webhook-server-role
+rules:
+  # Read pods, logs, events
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "events", "namespaces"]
+    verbs: ["get", "list", "watch"]
+  # Read & patch Deployments (for OOM auto-fix: patch resources + rollout restart)
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: webhook-server-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: webhook-server-role
+subjects:
+  - kind: ServiceAccount
+    name: webhook-server-sa
+    namespace: alertmanager-agent
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager-webhook-server
+  namespace: alertmanager-agent
+  labels:
+    app: alertmanager-webhook-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager-webhook-server
+  template:
+    metadata:
+      labels:
+        app: alertmanager-webhook-server
+    spec:
+      serviceAccountName: webhook-server-sa
+      containers:
+        - name: webhook
+          # TODO: replace with your ECR image URI, e.g.:
+          # <account>.dkr.ecr.<region>.amazonaws.com/alertmanager-webhook-server:latest
+          image: <YOUR_ECR_ACCOUNT_ID>.dkr.ecr.<YOUR_AWS_REGION>.amazonaws.com/alertmanager-webhook-server:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - secretRef:
+                name: webhook-secrets
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+
+---
+# ClusterIP Service – Alertmanager reaches the pod at:
+#   http://alertmanager-webhook-server.alertmanager-agent.svc.cluster.local/webhook
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager-webhook-server
+  namespace: alertmanager-agent
+  labels:
+    app: alertmanager-webhook-server
+spec:
+  selector:
+    app: alertmanager-webhook-server
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+
+---
+# Create the secret BEFORE applying this file:
+#   kubectl apply -f webhook-server/secret.yaml

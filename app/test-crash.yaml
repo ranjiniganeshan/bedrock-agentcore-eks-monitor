@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-app-crashing
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-app-crashing
+  template:
+    metadata:
+      labels:
+        app: demo-app-crashing
+    spec:
+      containers:
+        - name: app
+          image: polinux/stress
+          command: ["stress"]
+          args: ["--vm", "1", "--vm-bytes", "100M", "--vm-hang", "0"]
+          resources:
+            limits:
+              memory: "32Mi"
+            requests:
+              memory: "16Mi"

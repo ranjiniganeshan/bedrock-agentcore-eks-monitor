@@ -1,0 +1,55 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: demo-app-alerts
+  namespace: monitoring
+  labels:
+    release: monitoring  # This matches the release name of your kube-prometheus-stack
+spec:
+  groups:
+  - name: demo-app.alerts
+    rules:
+    - alert: DemoAppCrashLooping
+      expr: kube_pod_container_status_waiting_reason{namespace="default", pod=~"demo-app-.*", reason="CrashLoopBackOff"} == 1
+      for: 0m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Pod {{ $labels.pod }} is in CrashLoopBackOff"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} is in CrashLoopBackOff."
+
+    - alert: DemoAppOOMKilled
+      expr: kube_pod_container_status_last_terminated_reason{namespace="default", pod=~"demo-app-.*", reason="OOMKilled"} == 1
+      for: 0m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Pod {{ $labels.pod }} was OOMKilled"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} was OOMKilled."
+
+    - alert: KubeNodeNotReady
+      expr: kube_node_status_condition{condition="Ready",status="true"} == 0
+      for: 0m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Node {{ $labels.node }} is NotReady"
+        description: "Node {{ $labels.node }} has been in NotReady state."
+
+    - alert: KubeNodeMemoryPressure
+      expr: kube_node_status_condition{condition="MemoryPressure",status="true"} == 1
+      for: 0m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Node {{ $labels.node }} has MemoryPressure"
+        description: "Node {{ $labels.node }} is under memory pressure — risk of OOM and NotReady."
+
+    - alert: DemoAppImagePullError
+      expr: kube_pod_container_status_waiting_reason{namespace="default", pod=~"demo-app-.*", reason=~"ImagePullBackOff|ErrImagePull"} == 1
+      for: 0m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Pod {{ $labels.pod }} has an Image Pull Error"
+        description: "Pod {{ $labels.pod }} in namespace {{ $labels.namespace }} has been failing to pull the image for more than 5 minutes."
