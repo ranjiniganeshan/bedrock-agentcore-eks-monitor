@@ -17,12 +17,217 @@ Alertmanager → Webhook Server (EKS) → AgentCore Runtime (ARM64) → Claude H
 
 | Requirement | Details |
 |-------------|---------|
-| AWS account | EKS cluster named `demo-cluster` running in `us-east-1` |
+| AWS CLI v2 | Configured with credentials for your account |
+| eksctl | >= 0.100 |
 | Terraform | >= 1.3 |
-| kubectl | Configured for `demo-cluster` |
-| Docker | For building the agent container image |
-| Python 3 + boto3 | For the deploy script |
+| kubectl | >= 1.28 |
+| Helm | >= 3.12 |
+| Docker | Any recent version (with `buildx` for ARM64) |
+| Python 3 + pip | `pyyaml` must be installed (`pip install pyyaml`) |
 | Bedrock model access | `anthropic.claude-3-haiku-20240307-v1:0` enabled in your account |
+
+---
+
+## Full Stack Setup (Fresh Install)
+
+These are the exact commands to bring up the entire stack from scratch.
+
+### Step 0 — Clone the Repository
+
+```bash
+git clone git@github.com:ranjiniganeshan/bedrock-agentcore-eks-monitor.git
+cd bedrock-agentcore-eks-monitor
+```
+
+---
+
+### Step 1 — Create the EKS Cluster
+
+```bash
+eksctl create cluster \
+  --name demo-cluster \
+  --region us-east-1 \
+  --nodegroup-name demo-nodes \
+  --node-type t3.medium \
+  --nodes 2 \
+  --nodes-min 1 \
+  --nodes-max 3 \
+  --managed \
+  --with-oidc
+```
+
+This takes ~15–20 minutes. Once complete, update your kubeconfig:
+
+```bash
+aws eks update-kubeconfig --region us-east-1 --name demo-cluster
+kubectl get nodes   # verify both nodes are Ready
+```
+
+---
+
+### Step 2 — Create the STS VPC Endpoint
+
+Required for IRSA (pod-level IAM) to work inside the cluster.
+
+```bash
+# Get cluster VPC and subnets
+VPC_ID=$(aws eks describe-cluster --name demo-cluster --region us-east-1 \
+  --query 'cluster.resourcesVpcConfig.vpcId' --output text)
+
+SG=$(aws eks describe-cluster --name demo-cluster --region us-east-1 \
+  --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text)
+
+# List subnets and pick one per AZ (no duplicates allowed)
+aws ec2 describe-subnets \
+  --filters "Name=vpc-id,Values=$VPC_ID" \
+  --query 'Subnets[*].{ID:SubnetId,AZ:AvailabilityZone}' --output table
+
+# Create the interface endpoint (replace subnet IDs with one per AZ)
+aws ec2 create-vpc-endpoint \
+  --vpc-id "$VPC_ID" \
+  --service-name "com.amazonaws.us-east-1.sts" \
+  --vpc-endpoint-type Interface \
+  --subnet-ids <subnet-in-az1> <subnet-in-az2> \
+  --security-group-ids "$SG" \
+  --private-dns-enabled \
+  --region us-east-1
+
+# Wait for it to become available (~30–60s)
+aws ec2 describe-vpc-endpoints \
+  --filters "Name=vpc-id,Values=$VPC_ID" \
+           "Name=service-name,Values=com.amazonaws.us-east-1.sts" \
+  --query 'VpcEndpoints[*].{ID:VpcEndpointId,State:State}' --output table
+```
+
+---
+
+### Step 3 — Install Python Dependency
+
+The deploy script uses `pyyaml` to patch the EKS `aws-auth` ConfigMap.
+
+```bash
+pip install --break-system-packages pyyaml
+# or: pip install --user pyyaml
+```
+
+---
+
+### Step 4 — Create ECR Repository and Push the Agent Image
+
+AgentCore Runtime runs on **Graviton (ARM64)**. The image must be built for `linux/arm64`.
+
+```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+REGION=us-east-1
+IMAGE="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/k8s-agent:latest"
+
+# Create ECR repository
+aws ecr create-repository --repository-name k8s-agent --region $REGION
+
+# Authenticate Docker to ECR
+aws ecr get-login-password --region $REGION \
+  | docker login --username AWS --password-stdin \
+    ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com
+
+# Build for ARM64 and push
+docker build \
+  --platform linux/arm64 \
+  --provenance=false \
+  -t $IMAGE \
+  agentcore/
+
+docker push $IMAGE
+```
+
+---
+
+### Step 5 — Deploy the Stack
+
+`deploy.sh` runs `terraform init`, imports any pre-existing resources (ECR, OIDC provider, IAM roles), applies all infrastructure, patches `aws-auth`, and writes the AgentCore Runtime ID.
+
+```bash
+bash deploy.sh
+```
+
+To include JIRA and Slack escalation, set credentials before running:
+
+```bash
+export TF_VAR_jira_base_url=https://<your-org>.atlassian.net/
+export TF_VAR_jira_project_key=<PROJECT_KEY>
+export TF_VAR_jira_email=<your-email>
+export TF_VAR_jira_api_token=<your-jira-api-token>
+export TF_VAR_slack_webhook_url=https://hooks.slack.com/services/...
+bash deploy.sh
+```
+
+> **JIRA and Slack are optional.** Without them, OOM and CrashLoopBackOff auto-remediation still works.
+
+Expected outputs:
+
+```
+agentcore_runtime_id        = "k8s_troubleshooter-<id>"
+agentcore_runtime_role_arn  = "arn:aws:iam::<account>:role/agentcore-k8s-troubleshooter-role"
+agentcore_artifacts_bucket  = "agentcore-artifacts-<account>-us-east-1"
+webhook_server_irsa_role_arn= "arn:aws:iam::<account>:role/webhook-server-irsa-role"
+webhook_alertmanager_url    = "http://alertmanager-webhook-server.alertmanager-agent.svc.cluster.local/api/investigate"
+```
+
+---
+
+### Step 6 — Install the Monitoring Stack
+
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+helm install monitoring prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --create-namespace \
+  -f monitoring/values.yaml
+```
+
+Verify all pods are Running:
+
+```bash
+kubectl get pods -n monitoring
+```
+
+---
+
+### Step 7 — Apply Alert Rules and Demo App
+
+```bash
+# PrometheusRules: OOMKilled, CrashLoopBackOff, ImagePullBackOff
+kubectl apply -f monitoring/demo-app-alerts.yaml
+
+# Demo app with a low 64Mi memory limit (easy to OOMKill)
+kubectl apply -f app/deployment.yml
+kubectl get pods   # wait for Running
+```
+
+---
+
+### Step 8 — Configure Alertmanager
+
+```bash
+kubectl apply -f monitoring/alertmanager-secret.yaml
+
+kubectl -n monitoring rollout restart \
+  statefulset/alertmanager-monitoring-kube-prometheus-alertmanager
+```
+
+---
+
+### Verify the Full Stack
+
+```bash
+kubectl get nodes
+kubectl get pods -n monitoring
+kubectl get pods -n alertmanager-agent
+kubectl get pods -n default -l app=demo-app
+```
+
+All components should show `Running`. The stack is ready to handle alerts.
 
 ---
 
@@ -61,61 +266,6 @@ bedrock-agentcore-eks-monitor/
 ```
 
 ---
-
-## Step 1 — Build and Push the Agent Container Image
-
-AgentCore Runtime runs on **Graviton (ARM64)**. The image must be built for `linux/arm64`.
-
-```bash
-# Authenticate to ECR
-aws ecr get-login-password --region us-east-1 \
-  | docker login --username AWS --password-stdin \
-    <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com
-
-# Build for ARM64 (required — AgentCore is Graviton-based)
-cd agentcore/
-docker build \
-  --platform linux/arm64 \
-  --provenance=false \
-  -t <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/k8s-agent:latest \
-  .
-
-# Push
-docker push <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/k8s-agent:latest
-```
-
----
-
-## Step 2 — Deploy the Stack
-
-A single script handles everything: `terraform init`, imports pre-existing resources (ECR, OIDC provider), applies all infrastructure, patches the aws-auth configmap, and configures the STS VPC endpoint — no manual steps required.
-
-```bash
-bash deploy.sh
-```
-
-To include JIRA and Slack escalation, set these environment variables before running:
-
-```bash
-export TF_VAR_jira_base_url=https://<your-org>.atlassian.net/
-export TF_VAR_jira_project_key=<PROJECT_KEY>
-export TF_VAR_jira_email=<your-email>
-export TF_VAR_jira_api_token=<your-jira-api-token>
-export TF_VAR_slack_webhook_url=https://hooks.slack.com/services/...
-bash deploy.sh
-```
-
-> **JIRA and Slack are optional.** Without them, OOM and CrashLoopBackOff auto-remediation still works.
-
-### Outputs
-
-| Output | Description |
-|--------|-------------|
-| `agentcore_runtime_id` | AgentCore Runtime ID (e.g. `k8s_troubleshooter-abc123`) |
-| `agentcore_runtime_role_arn` | IAM role used by the runtime |
-| `agentcore_artifacts_bucket` | S3 bucket for code artifacts |
-| `webhook_server_irsa_role_arn` | IRSA role for the webhook pod |
-| `webhook_alertmanager_url` | Internal K8s URL for Alertmanager config |
 
 ---
 
@@ -277,4 +427,3 @@ terraform destroy \
 | Session ID | Per-alert fingerprint, minimum 33 characters (AgentCore requirement) |
 | Cold start | Container-based deployment (~3s vs ~3min for S3 zip + pip install) |
 | JIRA project | Must exist before deployment — verify with your Atlassian admin |
-# bedrock-agentcore-eks-monitor
