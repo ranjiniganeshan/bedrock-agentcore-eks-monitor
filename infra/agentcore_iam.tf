@@ -15,8 +15,11 @@ resource "aws_iam_openid_connect_provider" "eks" {
 # This sleep prevents the AgentCore Runtime deploy from failing on first apply.
 
 resource "time_sleep" "iam_propagation" {
-  create_duration = "15s"
-  depends_on = [aws_iam_openid_connect_provider.eks]
+  create_duration = "30s"
+  depends_on = [
+    aws_iam_openid_connect_provider.eks,
+    aws_iam_role_policy.agentcore_runtime_policy,
+  ]
 }
 
 # ─── AgentCore Runtime execution role ────────────────────────────────────────
