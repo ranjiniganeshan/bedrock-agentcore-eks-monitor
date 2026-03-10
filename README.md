@@ -57,9 +57,6 @@ bedrock-agentcore-eks-monitor/
 │   ├── alertmanager-secret.yaml  # Alertmanager routes + webhook config
 │   ├── demo-app-alerts.yaml      # Prometheus alert rules for demo apps
 │   └── values.yaml
-├── test2.py                      # Deploy crashloop app → trigger CrashLoopBackOff scenario
-├── test3.py                      # Direct webhook: trigger ImagePullBackOff escalation
-├── test4.py                      # Direct webhook: trigger Node NotReady escalation
 └── demo.sh                       # Run all 3 scenarios end-to-end (automated)
 ```
 
@@ -230,8 +227,7 @@ kubectl get deployment demo-app-crashing -n default \
 Deploys a pod that exits immediately. AgentCore triggers a rollout restart.
 
 ```bash
-# Deploys app/test-crashloop.yaml
-python3 test2.py
+kubectl apply -f app/test-crashloop.yaml
 kubectl get pods -n default -w
 ```
 
@@ -264,10 +260,14 @@ Expected (~60s): agent creates a JIRA ticket and sends a Slack notification.
 
 ### Scenario 4 — Node NotReady / MemoryPressure (JIRA + Slack escalation)
 
-Simulates a node under MemoryPressure. AgentCore cordons the node and escalates to JIRA and Slack.
+When a node enters `MemoryPressure` or goes `NotReady`, Prometheus fires a `KubeNodeNotReady` alert → Alertmanager sends the webhook → AgentCore cordons the node and escalates to JIRA and Slack.
 
+No manual trigger needed — this fires automatically when a node becomes unhealthy.
+
+**Watch it fire:**
 ```bash
-python3 test4.py
+kubectl get nodes -w
+kubectl logs -n alertmanager-agent deployment/alertmanager-webhook-server -f
 ```
 
 Expected: agent cordons the node, creates a JIRA ticket, and sends a Slack notification.
