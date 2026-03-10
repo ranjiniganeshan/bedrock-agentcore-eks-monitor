@@ -85,6 +85,7 @@ echo "SG:  $SG"
 
 # List subnets — pick ONE subnet ID per AZ from the output (duplicates cause an error)
 aws ec2 describe-subnets \
+  --region us-east-1 \
   --filters "Name=vpc-id,Values=$VPC_ID" \
   --query 'Subnets[*].{ID:SubnetId,AZ:AvailabilityZone}' --output table
 
