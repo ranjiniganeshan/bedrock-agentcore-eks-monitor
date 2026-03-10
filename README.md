@@ -121,6 +121,9 @@ pip install --break-system-packages pyyaml
 
 ### Step 4 — Create ECR Repository and Push the Agent Image
 
+> **Skip this step if the `k8s-agent` image already exists in ECR.**
+> Verify with: `aws ecr describe-images --repository-name k8s-agent --region us-east-1`
+
 AgentCore Runtime runs on **Graviton (ARM64)**. The image must be built for `linux/arm64`.
 
 ```bash
