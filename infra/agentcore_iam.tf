@@ -10,6 +10,15 @@ resource "aws_iam_openid_connect_provider" "eks" {
   url             = data.aws_eks_cluster.example.identity[0].oidc[0].issuer
 }
 
+# ─── IAM propagation delay ───────────────────────────────────────────────────
+# IAM roles and policies can take a few seconds to propagate globally.
+# This sleep prevents the AgentCore Runtime deploy from failing on first apply.
+
+resource "time_sleep" "iam_propagation" {
+  create_duration = "15s"
+  depends_on = [aws_iam_openid_connect_provider.eks]
+}
+
 # ─── AgentCore Runtime execution role ────────────────────────────────────────
 
 resource "aws_iam_role" "agentcore_runtime_role" {

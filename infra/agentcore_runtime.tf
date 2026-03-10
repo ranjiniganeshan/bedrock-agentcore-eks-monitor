@@ -90,6 +90,7 @@ resource "null_resource" "agentcore_runtime" {
   depends_on = [
     aws_iam_role_policy.agentcore_runtime_policy,
     aws_ecr_repository.k8s_agent,
+    time_sleep.iam_propagation,
   ]
 }
 

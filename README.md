@@ -84,57 +84,30 @@ docker build \
 docker push <AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/k8s-agent:latest
 ```
 
-> **Note:** The ECR repository (`k8s-agent`) is created by Terraform in Step 3. If it doesn't exist yet, create it first or run `terraform apply` once without `agentcore_container_image` to create the repo, then build and push, then apply again with the image.
-
 ---
 
-## Step 2 — Fix the STS VPC Endpoint Security Group
+## Step 2 — Deploy the Stack
 
-The EKS nodes use IRSA (IAM Roles for Service Accounts). IRSA requires pods to call AWS STS to exchange tokens. The STS VPC endpoint security group needs an inbound HTTPS rule from the VPC CIDR.
-
-```bash
-# Get the STS VPC endpoint security group ID
-STS_SG=$(aws ec2 describe-vpc-endpoints --region us-east-1 \
-  --filters "Name=service-name,Values=com.amazonaws.us-east-1.sts" \
-  --query 'VpcEndpoints[0].Groups[0].GroupId' --output text)
-
-# Allow HTTPS from VPC CIDR (172.31.0.0/16 for default VPC)
-aws ec2 authorize-security-group-ingress --region us-east-1 \
-  --group-id $STS_SG \
-  --protocol tcp --port 443 --cidr 172.31.0.0/16
-```
-
-> This is a **one-time fix** — the rule persists across Terraform destroy/apply cycles.
-
----
-
-## Step 3 — Deploy the Stack
+A single script handles everything: `terraform init`, imports pre-existing resources (ECR, OIDC provider), applies all infrastructure, patches the aws-auth configmap, and configures the STS VPC endpoint — no manual steps required.
 
 ```bash
-cd infra/
-
-# Initialize Terraform
-terraform init
-
-# If ECR repo already exists (image preserved from previous run), import it
-terraform import -var="aws_account_id=<AWS_ACCOUNT_ID>" \
-  aws_ecr_repository.k8s_agent k8s-agent
-
-# Deploy
-terraform apply \
-  -var="aws_account_id=<AWS_ACCOUNT_ID>" \
-  -var="agentcore_container_image=<AWS_ACCOUNT_ID>.dkr.ecr.us-east-1.amazonaws.com/k8s-agent:latest" \
-  -var='jira_base_url=https://<your-org>.atlassian.net/' \
-  -var='jira_project_key=<PROJECT_KEY>' \
-  -var='jira_email=<your-email>' \
-  -var='jira_api_token=<your-jira-api-token>' \
-  -var='slack_webhook_url=https://hooks.slack.com/services/...' \
-  -auto-approve
+bash deploy.sh
 ```
 
-> **JIRA and Slack are optional.** Omit those vars to deploy without escalation (OOM + CrashLoop auto-fix still works).
+To include JIRA and Slack escalation, set these environment variables before running:
 
-### Terraform Outputs
+```bash
+export TF_VAR_jira_base_url=https://<your-org>.atlassian.net/
+export TF_VAR_jira_project_key=<PROJECT_KEY>
+export TF_VAR_jira_email=<your-email>
+export TF_VAR_jira_api_token=<your-jira-api-token>
+export TF_VAR_slack_webhook_url=https://hooks.slack.com/services/...
+bash deploy.sh
+```
+
+> **JIRA and Slack are optional.** Without them, OOM and CrashLoopBackOff auto-remediation still works.
+
+### Outputs
 
 | Output | Description |
 |--------|-------------|
@@ -143,25 +116,6 @@ terraform apply \
 | `agentcore_artifacts_bucket` | S3 bucket for code artifacts |
 | `webhook_server_irsa_role_arn` | IRSA role for the webhook pod |
 | `webhook_alertmanager_url` | Internal K8s URL for Alertmanager config |
-
----
-
-## Step 4 — Add AgentCore Role to EKS aws-auth
-
-Allow the AgentCore Runtime to call the K8s API:
-
-```bash
-kubectl edit configmap aws-auth -n kube-system
-```
-
-Add under `mapRoles`:
-
-```yaml
-- rolearn: arn:aws:iam::<AWS_ACCOUNT_ID>:role/agentcore-k8s-troubleshooter-role
-  username: agentcore-agent
-  groups:
-    - system:masters
-```
 
 ---
 
