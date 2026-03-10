@@ -69,20 +69,26 @@ kubectl get nodes   # verify both nodes are Ready
 
 Required for IRSA (pod-level IAM) to work inside the cluster.
 
+> **Run this only after Step 1 completes and the cluster is ACTIVE.**
+> The `$VPC_ID` and `$SG` variables are read from the live cluster — they will be empty if the cluster does not exist yet.
+
 ```bash
-# Get cluster VPC and subnets
+# Populate variables from the running cluster
 VPC_ID=$(aws eks describe-cluster --name demo-cluster --region us-east-1 \
   --query 'cluster.resourcesVpcConfig.vpcId' --output text)
 
 SG=$(aws eks describe-cluster --name demo-cluster --region us-east-1 \
   --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text)
 
-# List subnets and pick one per AZ (no duplicates allowed)
+echo "VPC: $VPC_ID"
+echo "SG:  $SG"
+
+# List subnets — pick ONE subnet ID per AZ from the output (duplicates cause an error)
 aws ec2 describe-subnets \
   --filters "Name=vpc-id,Values=$VPC_ID" \
   --query 'Subnets[*].{ID:SubnetId,AZ:AvailabilityZone}' --output table
 
-# Create the interface endpoint (replace subnet IDs with one per AZ)
+# Create the interface endpoint using one subnet per AZ
 aws ec2 create-vpc-endpoint \
   --vpc-id "$VPC_ID" \
   --service-name "com.amazonaws.us-east-1.sts" \
